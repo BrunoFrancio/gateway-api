@@ -9,11 +9,13 @@ use Illuminate\Database\Seeder;
 class DatabaseSeeder extends Seeder
 {
     /**
-     * Seed the application's database.
+ * Seed the application's database.
      */
     public function run(): void
     {
-        // User::factory(10)->create();
+        if (app()->environment('local')) {
+            $this->call(\Database\Seeders\GatewaysSeeder::class);
+        }
 
         User::factory()->create([
             'name' => 'Test User',
