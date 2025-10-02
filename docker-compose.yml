@@ -1,0 +1,50 @@
+services:
+  app:
+    build: .
+    container_name: app
+    volumes:
+      - .:/var/www/html
+      - /docker/logs/gateway-api:/var/www/html/storage/logs
+      - /docker/data/gateway_api_storage:/var/www/html/storage/app/private
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+    depends_on: [db]
+    restart: unless-stopped
+    networks: [nw]
+
+  proxy:
+    image: nginx:1.25
+    container_name: proxy
+    ports:
+      - "${APP_PORT:-8080}:80"
+      - "443:443"
+    volumes:
+      - ./https/nginx-${APP_ENV:-local}/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./https/certbot/conf:/etc/letsencrypt
+      - ./https/certbot/www:/var/www/certbot
+      - .:/var/www/html:ro
+    depends_on: [app]
+    restart: unless-stopped
+    networks: [nw]
+
+  db:
+    image: postgres:17.5
+    container_name: db
+    env_file:
+      - /docker/conf/gateway_api/env.db
+    environment:
+      POSTGRES_DB: gateway_api
+      POSTGRES_USER: gateway_api
+    volumes:
+      - /docker/data/gateway_api_pg:/var/lib/postgresql/data
+      - /docker/data/gateway_api_pg_bkp:/root/backup
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+    ports:
+      - "5432:5432"
+    restart: unless-stopped
+    networks: [nw]
+
+networks:
+  nw:
+    driver: bridge
