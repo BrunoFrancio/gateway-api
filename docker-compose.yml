@@ -8,8 +8,14 @@ services:
       - /docker/data/gateway_api_storage:/var/www/html/storage/app/private
       - /etc/timezone:/etc/timezone:ro
       - /etc/localtime:/etc/localtime:ro
-    depends_on: [db]
+    depends_on:
+      - db
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "php-fpm -t || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
     networks: [nw]
 
   proxy:
