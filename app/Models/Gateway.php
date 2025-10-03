@@ -30,4 +30,9 @@ class Gateway extends Model
         'last_seen_at' => 'datetime',
         'key_material_encrypted' => 'encrypted:string',
     ];
+
+    public function auditorias(): HasMany
+    {
+        return $this->hasMany(GatewayAudit::class, 'gateway_id');
+    }
 }
