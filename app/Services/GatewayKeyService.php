@@ -6,6 +6,7 @@ use App\Models\Gateway;
 use App\Models\GatewayAudit;
 use Illuminate\Support\Facades\DB;
 use Carbon\Carbon;
+use Illuminate\Support\Facades\Log;
 
 class GatewayKeyService
 {
@@ -54,7 +55,7 @@ class GatewayKeyService
     public function createGatewayWithKey(string $nome, ?int $atorId = null, array $atributosExtras = []): Gateway
     {
         return DB::transaction(function () use ($nome, $atorId, $atributosExtras) {
-            $materialDaChaveEmTextoPlano = $this->generateKeyMaterial();
+            $materialDaChaveEmTextoPlano = $this->generateKeyMaterial(32);
 
             $gateway = Gateway::create(array_merge([
                 'nome'                   => $nome,
@@ -70,6 +71,12 @@ class GatewayKeyService
                 'acao'       => 'criar_chave',
                 'old_key_id' => null,
                 'new_key_id' => 'key_v1',
+                'ator_id'    => $atorId,
+            ]);
+
+              Log::channel('gateway_audit')->info('Gateway criado com key_v1', [
+                'gateway_id' => $gateway->id,
+                'nome'       => $gateway->nome,
                 'ator_id'    => $atorId,
             ]);
 
@@ -90,7 +97,7 @@ class GatewayKeyService
             $identificadorChaveAnterior = $gateway->key_id;
             $identificadorChaveNova     = $this->nextKeyId($identificadorChaveAnterior);
 
-            $materialDaChaveEmTextoPlano = $this->generateKeyMaterial();
+            $materialDaChaveEmTextoPlano = $this->generateKeyMaterial(32);
 
             $gateway->forceFill([
                 'key_id'                 => $identificadorChaveNova,

@@ -133,7 +133,12 @@ return [
             'days'   => 14,
             'tap'    => [],
         ],
-
+        'gateway_sql' => [
+            'driver' => 'daily',
+            'path'   => storage_path('logs/gateway_sql.log'),
+            'level'  => 'info',
+            'days'   => 14,
+        ],
     ],
 
 ];

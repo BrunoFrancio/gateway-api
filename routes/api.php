@@ -17,4 +17,11 @@ Route::middleware('auth.basic')->group(function () {
     Route::get('/gateways/{gateway}', ShowGatewayAction::class);
     Route::patch('/gateways/{gateway}', UpdateGatewayAction::class);
     Route::patch('/gateways/{gateway}/rotate', RotateGatewayKeyAction::class);
+
+    // SQL Jobs por Gateway
+    Route::post('/gateways/{gateway}/sql-jobs', \App\Http\Controllers\Actions\Gateway\SqlJobs\CriarSqlJobAction::class);
+    Route::get('/gateways/{gateway}/sql-jobs/pending', \App\Http\Controllers\Actions\Gateway\SqlJobs\ListarPendentesAction::class);
+    Route::post('/gateways/{gateway}/sql-jobs/{job}/ack', \App\Http\Controllers\Actions\Gateway\SqlJobs\ConfirmarAckAction::class);
+    Route::post('/gateways/{gateway}/sql-jobs/{job}/fail', \App\Http\Controllers\Actions\Gateway\SqlJobs\RegistrarFalhaAction::class);
+
 });
