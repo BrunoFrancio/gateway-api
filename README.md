@@ -1,247 +1,459 @@
-# API de Gateways
+# Gateway API
 
 Sistema para gerenciamento de gateways com suporte a enfileiramento de SQLs cifrados para trânsito seguro e execução por agente local.
 
 ## Índice
 
-- [Autenticação e Headers](#autenticação-e-headers)
-- [Healthcheck](#healthcheck)
-- [API de Gateways](#endpoints-gateways)
-  - [Listar Gateways](#listar-gateways)
-  - [Criar Gateway](#criar-gateway)
-  - [Detalhar Gateway](#detalhar-gateway)
-  - [Atualizar Gateway](#atualizar-gateway)
-  - [Rotacionar Chave](#rotacionar-chave)
-- [Jobs de SQL por Gateway](#jobs-de-sql-por-gateway)
-  - [Criar Job de SQL](#criar-job-de-sql-admin)
-  - [Listar Jobs Pendentes](#listar-jobs-pendentes-agente)
-  - [Confirmar Processamento (ACK)](#confirmar-processamento-ack)
-  - [Registrar Falha](#registrar-falha)
+- [Visão Geral](#visão-geral)
+- [Infraestrutura](#infraestrutura)
+- [Requisitos](#requisitos)
+- [Instalação](#instalação)
+- [Sistema de Chaves e Segurança](#sistema-de-chaves-e-segurança)
+- [Autenticação](#autenticação)
+- [Endpoints da API](#endpoints-da-api)
+  - [Healthcheck](#healthcheck)
+  - [Gateways](#gateways)
+  - [Jobs de SQL](#jobs-de-sql)
 - [Criptografia em Trânsito](#criptografia-em-trânsito)
-- [Auditoria & Logs](#auditoria--logs)
-- [Troubleshooting](#troubleshooting-rápido)
+- [Cliente Python](#cliente-python)
+- [Tracking de Atividade](#tracking-de-atividade)
+- [Auditoria e Logs](#auditoria-e-logs)
+- [Testes](#testes)
+- [Troubleshooting](#troubleshooting)
 
 ---
 
-## Autenticação e Headers
+## Visão Geral
 
-**Auth:** HTTP Basic (usuário/senha da tabela users)
+A Gateway API permite:
 
-**Headers obrigatórios em chamadas JSON:**
+- **Gerenciar gateways** com CRUD completo e rotação de chaves
+- **Enfileirar SQLs criptografados** para execução remota segura
+- **Tracking automático** de atividade dos gateways
+- **Auditoria completa** de todas as operações
+
+### Fluxo de Operação
+
+1. **Admin** cria gateway via API e recebe chave (única vez)
+2. **Agente local** armazena chave e inicia polling
+3. **Admin** envia SQLs que são criptografados automaticamente
+4. **Agente local** busca jobs pendentes, descriptografa e executa
+5. **Agente local** confirma sucesso (ACK) ou falha
+
+---
+
+## Infraestrutura
+
+- **Web Server:** Nginx 1.25 (proxy reverso)
+- **Application Server:** PHP 8.2-FPM
+- **Database:** PostgreSQL 17.5
+- **Orquestração:** Docker Compose
+- **Healthchecks:** Configurados para todos os serviços
+
+### Arquitetura
+
+```
+┌─────────────┐
+│   Cliente   │
+└──────┬──────┘
+       │ HTTPS (443) / HTTP (8080)
+       ▼
+┌─────────────┐
+│    Nginx    │ (proxy reverso)
+└──────┬──────┘
+       │ FastCGI (9000)
+       ▼
+┌─────────────┐
+│  PHP-FPM    │ (aplicação Laravel)
+└──────┬──────┘
+       │ PostgreSQL (5432)
+       ▼
+┌─────────────┐
+│ PostgreSQL  │ (banco de dados)
+└─────────────┘
+```
+
+---
+
+## Requisitos
+
+### Servidor
+
+- Docker 20+
+- Docker Compose 2+
+- 2GB RAM mínimo
+- 10GB espaço em disco
+
+### Cliente/Agente Local
+
+- Python 3.8+
+- Bibliotecas: `requests`, `cryptography`
+
+### Opcional
+
+- Let's Encrypt para SSL automático
+- Redis para filas (futuro)
+
+---
+
+## Instalação
+
+### 1. Clonar Repositório
+
+```bash
+git clone <repo-url>
+cd gateway-api
+```
+
+### 2. Configurar Ambiente
+
+```bash
+cp .env.example .env
+```
+
+Editar `.env`:
+
+```env
+APP_ENV=local
+APP_DEBUG=true
+APP_URL=http://localhost:8080/api
+
+DB_HOST=db
+DB_DATABASE=gateway_api
+DB_USERNAME=gateway_api
+DB_PASSWORD=sua_senha_segura
+
+APP_PORT=8080
+```
+
+### 3. Subir Containers
+
+```bash
+docker-compose up -d
+```
+
+### 4. Instalar Dependências
+
+```bash
+docker exec app composer install
+```
+
+### 5. Rodar Migrations
+
+```bash
+docker exec app php artisan migrate --force
+```
+
+### 6. Criar Usuário Admin
+
+```bash
+docker exec -it app php artisan tinker
+```
+
+```php
+\App\Models\User::create([
+    'name' => 'Admin',
+    'email' => 'admin@admin.com',
+    'password' => bcrypt('senha_segura')
+]);
+exit
+```
+
+### 7. Verificar Instalação
+
+```bash
+curl http://localhost:8080/api/health
+# Resposta: {"status":"ok"}
+```
+
+---
+
+## Sistema de Chaves e Segurança
+
+### Importante: Exposição da Chave
+
+A chave criptográfica (`key_material`) é exposta **APENAS**:
+
+1. **Na criação do gateway** (`POST /api/gateways`)
+2. **Na rotação de chave** (`PATCH /api/gateways/{id}/rotate`)
+
+**Nunca** é retornada em:
+- `GET /api/gateways` (listagem)
+- `GET /api/gateways/{id}` (detalhes)
+- `PATCH /api/gateways/{id}` (atualização)
+
+### Exemplo: Criação de Gateway
+
+**Request:**
+
+```bash
+curl -u admin@admin.com:senha \
+  -H "Content-Type: application/json" \
+  -X POST http://localhost:8080/api/gateways \
+  -d '{"nome":"gateway-producao","ativo":true}'
+```
+
+**Response (única vez que a chave aparece):**
+
+```json
+{
+  "data": {
+    "id": "01k6r329jtd08nmnw6q4kgpwqn",
+    "nome": "gateway-producao",
+    "key_id": "key_v1",
+    "key_material": "PN/jor+IhBLaC4WEzaNdgr6Jy621VJjDjzNye4FGpvo=",
+    "created_at": "2025-10-04T17:07:15.000000Z"
+  },
+  "message": "Gateway criado com sucesso. ATENÇÃO: Armazene a chave de forma segura, ela não será exibida novamente!"
+}
+```
+
+### Armazenamento no Agente Local
+
+O agente deve armazenar `key_material` em:
+
+```bash
+# .env do agente
+GATEWAY_KEY_MATERIAL=PN/jor+IhBLaC4WEzaNdgr6Jy621VJjDjzNye4FGpvo=
+```
+
+Ou variável de ambiente:
+
+```bash
+export GATEWAY_KEY_MATERIAL="PN/jor+IhBLaC4WEzaNdgr6Jy621VJjDjzNye4FGpvo="
+```
+
+**Nunca** commitar chaves no código-fonte.
+
+### Rotação de Chaves
+
+Ao rotacionar, a nova chave é retornada:
+
+```bash
+curl -u admin@admin.com:senha \
+  -X PATCH http://localhost:8080/api/gateways/{id}/rotate
+```
+
+```json
+{
+  "data": {
+    "key_id": "key_v2",
+    "key_material": "nova_chave_base64_aqui...",
+    "key_rotated_at": "2025-10-04T17:30:00.000000Z"
+  },
+  "message": "Chave rotacionada com sucesso. ATENÇÃO: Atualize a chave no gateway local imediatamente!"
+}
+```
+
+O agente **deve** atualizar sua configuração local com a nova chave.
+
+### Validação de Nome do Gateway
+
+- **Formato:** apenas letras minúsculas, números, hífen e underscore
+- **Regex:** `^[a-z0-9\-_]+$`
+- **Único** na tabela
+- **Tamanho:** mínimo 3, máximo 100 caracteres
+
+Exemplos válidos: `gateway-sp`, `gw_producao_01`, `estacao-rj-2024`
+
+---
+
+## Autenticação
+
+**Método:** HTTP Basic Authentication
+
+**Headers obrigatórios:**
 - `Accept: application/json`
 - `Content-Type: application/json` (quando houver corpo)
-
-**Exemplo de header + auth:**
-
-```bash
-curl -u admin@local.test:admin12345 \
-  -H "Accept: application/json" \
-  http://localhost:8080/api/gateways
-```
-
-> **Nota de produção:** em ambientes públicos, recomenda-se restringir endpoints "admin-only" via Gate/Policy ou outro mecanismo.
-
----
-
-## Healthcheck
-
-**GET** `/api/health`
-
-Retorna `{"status":"ok"}` para verificação de liveness.
-
-```bash
-curl -s http://localhost:8080/api/health
-```
-
-## Endpoints Gateways
-
-### Listar Gateways
-
-**GET** `/api/gateways?active=&search=&page=&per_page=`
-
-**Parâmetros:**
-- `active`: 1 (true) ou 0 (false) — opcional
-- `search`: termo livre (nome) — opcional
-- `page`: número da página — opcional
-- `per_page`: padrão 15 — opcional
 
 **Exemplo:**
 
 ```bash
-curl -u admin@local.test:admin12345 -s \
+curl -u admin@admin.com:senha \
   -H "Accept: application/json" \
-  "http://localhost:8080/api/gateways?active=1&search=GW&page=1&per_page=10"
+  http://localhost:8080/api/gateways
 ```
 
-**Resposta (exemplo):**
+**Nota:** Em produção, considere OAuth2, JWT ou Laravel Sanctum para autenticação mais robusta.
+
+---
+
+## Endpoints da API
+
+### Healthcheck
+
+**GET** `/api/health`
+
+Verifica se a aplicação está funcionando.
+
+```bash
+curl http://localhost:8080/api/health
+```
+
+**Resposta:**
+
+```json
+{
+  "status": "ok"
+}
+```
+
+---
+
+### Gateways
+
+#### Listar Gateways
+
+**GET** `/api/gateways`
+
+**Parâmetros de Query:**
+- `ativo`: `1` (true) ou `0` (false)
+- `search`: busca por nome
+- `page`: número da página
+- `per_page`: itens por página (padrão: 15)
+
+**Exemplo:**
+
+```bash
+curl -u admin@admin.com:senha \
+  "http://localhost:8080/api/gateways?ativo=1&per_page=10"
+```
+
+**Resposta:**
 
 ```json
 {
   "data": [
     {
       "id": "01k6p5ezwvnj2j9zjazztp48gz",
-      "nome": "GW Local 02",
+      "nome": "gateway-producao",
       "ativo": true,
       "key_id": "key_v1",
       "key_alg": "app-key@laravel-crypt",
       "key_rotated_at": null,
-      "last_seen_at": null,
+      "last_seen_at": "2025-10-04T17:05:00.000000Z",
       "observacoes": null,
-      "criado_por": 1,
-      "atualizado_por": null,
       "created_at": "2025-10-03T23:10:39.000000Z",
-      "updated_at": "2025-10-03T23:10:39.000000Z"
+      "updated_at": "2025-10-04T17:05:00.000000Z"
     }
   ],
   "meta": {
     "current_page": 1,
     "per_page": 10,
     "total": 1,
-    "last_page": 1,
-    "from": 1,
-    "to": 1
-  },
-  "links": {
-    "first": "http://localhost:8080/api/gateways?page=1",
-    "last": "http://localhost:8080/api/gateways?page=1",
-    "prev": null,
-    "next": null
+    "last_page": 1
   }
 }
 ```
 
----
+**Nota:** `key_material` **nunca** aparece neste endpoint.
 
-### Criar Gateway
+#### Criar Gateway
 
 **POST** `/api/gateways`
 
-**Corpo:**
+**Body:**
 
 ```json
 {
-  "nome": "GW API 01",
+  "nome": "gateway-sp-01",
   "ativo": true,
-  "observacoes": "criado via API"
+  "observacoes": "Gateway da filial SP"
 }
 ```
 
 **Exemplo:**
 
 ```bash
-curl -u admin@local.test:admin12345 -s \
-  -H "Accept: application/json" \
+curl -u admin@admin.com:senha \
   -H "Content-Type: application/json" \
   -X POST http://localhost:8080/api/gateways \
-  -d '{"nome":"GW API 01","ativo":true,"observacoes":"criado via API"}'
+  -d '{"nome":"gateway-sp-01","ativo":true}'
 ```
 
-**Resposta (exemplo):**
+**Resposta (única vez com key_material):**
 
 ```json
 {
   "data": {
-    "id": "01k6p9p7re7q9e83daaqv1jpyp",
-    "nome": "GW API 01",
+    "id": "01k6r329jtd08nmnw6q4kgpwqn",
+    "nome": "gateway-sp-01",
     "ativo": true,
     "key_id": "key_v1",
     "key_alg": "app-key@laravel-crypt",
-    "key_rotated_at": null,
-    "last_seen_at": null,
-    "observacoes": "criado via API",
-    "criado_por": 1,
-    "atualizado_por": null,
-    "created_at": "2025-10-04T00:24:31.000000Z",
-    "updated_at": "2025-10-04T00:24:31.000000Z"
-  }
+    "key_material": "1bvF9syKJ7b+533dZ+adZIBbDl4Wqz3YsBQ3Q9iU5Vs=",
+    "observacoes": "Gateway da filial SP",
+    "created_at": "2025-10-04T17:07:15.000000Z"
+  },
+  "message": "Gateway criado com sucesso. ATENÇÃO: Armazene a chave de forma segura, ela não será exibida novamente!"
 }
 ```
 
----
-
-### Detalhar Gateway
+#### Visualizar Gateway
 
 **GET** `/api/gateways/{id}`
 
-**Exemplo:**
-
 ```bash
-curl -u admin@local.test:admin12345 -s \
-  -H "Accept: application/json" \
-  http://localhost:8080/api/gateways/01k6p9p7re7q9e83daaqv1jpyp
+curl -u admin@admin.com:senha \
+  http://localhost:8080/api/gateways/01k6r329jtd08nmnw6q4kgpwqn
 ```
 
----
+**Nota:** `key_material` **não** é incluído na resposta.
 
-### Atualizar Gateway
+#### Atualizar Gateway
 
 **PATCH** `/api/gateways/{id}`
 
-**Corpo (exemplo):**
+**Body:**
 
 ```json
 {
-  "nome": "GW API 01 (editado)",
-  "ativo": true,
-  "observacoes": "ajuste de nome"
+  "nome": "gateway-sp-01-updated",
+  "ativo": false,
+  "observacoes": "Em manutenção"
 }
 ```
 
-**Exemplo:**
-
 ```bash
-curl -u admin@local.test:admin12345 -s \
-  -H "Accept: application/json" \
+curl -u admin@admin.com:senha \
   -H "Content-Type: application/json" \
-  -X PATCH http://localhost:8080/api/gateways/01k6p9p7re7q9e83daaqv1jpyp \
-  -d '{"nome":"GW API 01 (editado)","ativo":true,"observacoes":"ajuste de nome"}'
+  -X PATCH http://localhost:8080/api/gateways/{id} \
+  -d '{"nome":"gateway-sp-01-updated","ativo":false}'
 ```
 
----
-
-### Rotacionar Chave
+#### Rotacionar Chave
 
 **PATCH** `/api/gateways/{id}/rotate`
 
-Não há corpo. Gera `key_v{n+1}`, atualiza `key_rotated_at` e audita a ação.
-
-**Exemplo:**
+Gera uma nova versão da chave (`key_v2`, `key_v3`, etc).
 
 ```bash
-curl -u admin@local.test:admin12345 -s \
-  -H "Accept: application/json" \
-  -X PATCH http://localhost:8080/api/gateways/01k6p9p7re7q9e83daaqv1jpyp/rotate
+curl -u admin@admin.com:senha \
+  -X PATCH http://localhost:8080/api/gateways/{id}/rotate
 ```
 
-**Resposta (exemplo):**
+**Resposta:**
 
 ```json
 {
-  "mensagem": "Chave rotacionada com sucesso.",
   "data": {
-    "id": "01k6p9p7re7q9e83daaqv1jpyp",
-    "nome": "GW API 01 (editado)",
+    "id": "01k6r329jtd08nmnw6q4kgpwqn",
+    "nome": "gateway-sp-01",
     "key_id": "key_v2",
-    "key_alg": "app-key@laravel-crypt",
-    "key_rotated_at": "2025-10-04T00:30:36.000000Z",
-    "atualizado_por": 1,
-    "updated_at": "2025-10-04T00:30:36.000000Z"
-  }
+    "key_material": "PmQ+YUrPt41F0QlBnueUE5Vr7IP/9zUBeAL+Q8cgG24=",
+    "key_rotated_at": "2025-10-04T17:07:58.000000Z"
+  },
+  "message": "Chave rotacionada com sucesso. ATENÇÃO: Atualize a chave no gateway local imediatamente!"
 }
 ```
 
 ---
 
-## Jobs de SQL por Gateway
+### Jobs de SQL
 
-Permite enfileirar SQLs cifrados para trânsito por Gateway e consumi-los pelo agente local.
-
-### Criar Job de SQL (admin)
+#### Criar Job de SQL
 
 **POST** `/api/gateways/{id}/sql-jobs`
-
-**Headers:** `Accept: application/json`, `Content-Type: application/json`  
-**Auth:** Basic (usuário admin)
 
 **Body:**
 
@@ -255,68 +467,54 @@ Permite enfileirar SQLs cifrados para trânsito por Gateway e consumi-los pelo a
 **Exemplo:**
 
 ```bash
-ID=$(curl -s -u admin@local.test:admin12345 -H "Accept: application/json" \
-  http://localhost:8080/api/gateways \
-  | python3 -c 'import sys,json; print(json.load(sys.stdin)["data"][0]["id"])')
-
-curl -s -u admin@local.test:admin12345 \
-  -H "Accept: application/json" -H "Content-Type: application/json" \
-  -X POST "http://localhost:8080/api/gateways/$ID/sql-jobs" \
+curl -u admin@admin.com:senha \
+  -H "Content-Type: application/json" \
+  -X POST http://localhost:8080/api/gateways/{id}/sql-jobs \
   -d '{"sql":"UPDATE contas SET ativo = true WHERE id = 123;"}'
 ```
 
-**Resposta (exemplo):**
+**Resposta:**
 
 ```json
 {
   "data": {
     "id": "01k6qnta4nqnxqa79nb1j7thbg",
-    "gateway_id": "01k6kjhj1p03y2x41yj4pqsks3",
+    "gateway_id": "01k6r329jtd08nmnw6q4kgpwqn",
     "status": "pending",
     "transit_alg": "xchacha20poly1305@libsodium",
-    "key_id": "key_v3",
+    "key_id": "key_v1",
     "disponivel_em": null,
     "created_at": "2025-10-04T13:15:42.000000Z"
   }
 }
 ```
 
-### Fluxo operacional do agente
+#### Listar Jobs Pendentes
 
-1. **Listar pendentes:** `GET /api/gateways/{id}/sql-jobs/pending`
-2. **Decifrar localmente** usando `transit_alg`, `nonce`, `tag` (se houver) e a chave da `key_id` do job.
-3. **Executar** o SQL na estação.
-4. **Responder:**
-   - sucesso → `POST /api/gateways/{id}/sql-jobs/{job}/ack`
-   - falha → `POST /api/gateways/{id}/sql-jobs/{job}/fail` com `{"mensagem":"..."}`
+**GET** `/api/gateways/{id}/sql-jobs/pending?limit=10`
 
+**Parâmetros:**
+- `limit`: máximo de jobs a retornar (padrão: 10, máx: 100)
 
----
+```bash
+curl -u admin@admin.com:senha \
+  "http://localhost:8080/api/gateways/{id}/sql-jobs/pending?limit=10"
+```
 
-### Listar Jobs Pendentes (agente)
-
-**GET** `/api/gateways/{id}/sql-jobs/pending`
-
-**Headers:** `Accept: application/json`  
-**Auth:** Basic (temporário)
-
-> **Observação:** autenticação dedicada do agente está no backlog.
-
-**Resposta (exemplo):**
+**Resposta:**
 
 ```json
 {
   "data": [
     {
       "id": "01k6qnta4nqnxqa79nb1j7thbg",
-      "gateway_id": "01k6kjhj1p03y2x41yj4pqsks3",
-      "key_id": "key_v3",
+      "gateway_id": "01k6r329jtd08nmnw6q4kgpwqn",
+      "status": "sent",
       "transit_alg": "xchacha20poly1305@libsodium",
-      "sql_ciphertext": "<base64>",
-      "nonce": "<base64>",
+      "key_id": "key_v1",
+      "ciphertext": "eMbIwOG8/VTzrtCLmD9JtB21ZIBD64mlNf1E4Y0z2+rehequD83HSHc1tzQGvyh3",
+      "nonce": "FYoPUcbTUGhwWdpjSJG9uHQixRSTJzI4",
       "tag": null,
-      "tentativas": 0,
-      "status": "pending",
       "disponivel_em": null,
       "created_at": "2025-10-04T13:15:42.000000Z"
     }
@@ -324,45 +522,49 @@ curl -s -u admin@local.test:admin12345 \
 }
 ```
 
----
+**Nota:** O status muda automaticamente para `sent` quando o job é retornado.
 
-### Confirmar Processamento (ACK)
+#### Confirmar Processamento (ACK)
 
 **POST** `/api/gateways/{id}/sql-jobs/{job}/ack`
 
-**Headers:** `Accept: application/json`  
-**Auth:** Basic (temporário)
+```bash
+curl -u admin@admin.com:senha \
+  -X POST http://localhost:8080/api/gateways/{id}/sql-jobs/{job_id}/ack
+```
 
-**Resposta (exemplo):**
+**Resposta:**
 
 ```json
 {
-  "mensagem": "ack registrado"
+  "message": "ACK registrado com sucesso"
 }
 ```
 
----
-
-### Registrar Falha
+#### Registrar Falha
 
 **POST** `/api/gateways/{id}/sql-jobs/{job}/fail`
-
-**Headers:** `Accept: application/json`, `Content-Type: application/json`  
-**Auth:** Basic (temporário)
 
 **Body:**
 
 ```json
 {
-  "mensagem": "erro de sintaxe no SQL"
+  "mensagem": "Erro de sintaxe SQL na linha 5"
 }
 ```
 
-**Resposta (exemplo):**
+```bash
+curl -u admin@admin.com:senha \
+  -H "Content-Type: application/json" \
+  -X POST http://localhost:8080/api/gateways/{id}/sql-jobs/{job_id}/fail \
+  -d '{"mensagem":"Erro de sintaxe SQL"}'
+```
+
+**Resposta:**
 
 ```json
 {
-  "mensagem": "falha registrada"
+  "message": "Falha registrada"
 }
 ```
 
@@ -370,127 +572,463 @@ curl -s -u admin@local.test:admin12345 \
 
 ## Criptografia em Trânsito
 
-### Preferência: libsodium
+O sistema usa **AEAD** (Authenticated Encryption with Associated Data) para garantir confidencialidade e integridade.
 
-**Algoritmo:** `xchacha20poly1305@libsodium`
+### Algoritmo Preferencial: libsodium
 
-**Campos:**
-- `sql_ciphertext` (base64)
-- `nonce` (base64)
-- `tag` = null (MAC já embutido no ciphertext)
+**Nome:** `xchacha20poly1305@libsodium`
 
-**Decifrar (PHP):**
+**Características:**
+- Cipher: XChaCha20 (stream cipher)
+- MAC: Poly1305 (autenticação)
+- Nonce: 24 bytes (192 bits)
+- Tag: embutido no ciphertext
 
-```php
-sodium_crypto_aead_xchacha20poly1305_ietf_decrypt($cipher, '', $nonce, $key)
-```
+**Campos retornados:**
+- `ciphertext`: SQL criptografado + tag (base64)
+- `nonce`: nonce usado (base64)
+- `tag`: `null` (já incluído no ciphertext)
 
-### Fallback: OpenSSL
+### Algoritmo Fallback: OpenSSL
 
-**Algoritmo:** `aes-256-gcm@openssl`
+**Nome:** `aes-256-gcm@openssl`
 
-**Campos:**
-- `sql_ciphertext` (base64)
-- `nonce` (IV, base64)
-- `tag` (base64)
+**Características:**
+- Cipher: AES-256 em modo GCM
+- MAC: GCM authentication tag
+- Nonce: 12 bytes (96 bits)
+- Tag: separado do ciphertext
 
-**Decifrar (PHP):**
+**Campos retornados:**
+- `ciphertext`: SQL criptografado (base64)
+- `nonce`: IV usado (base64)
+- `tag`: authentication tag (base64)
 
-```php
-openssl_decrypt($cipher, 'aes-256-gcm', $key, OPENSSL_RAW_DATA, $iv, $tag)
-```
+### Descriptografia
 
-### Observações de Segurança
+O agente deve:
 
-- A chave usada é o material do próprio Gateway (campo `key_id` indica a versão ativa)
-- O agente deve decifrar com a mesma `key_id`
-- **Dependências:** ext-sodium (recomendado) ou ext-openssl
-- **Segurança:** o SQL nunca é logado em texto puro; somente ciphertext e metadados
-- O material de chave não é exposto nos logs
-- Em trânsito, os dados vão cifrados
-- Em repouso, o projeto mantém o campo `key_id` e o material da chave para uso do agente
-- Cifrar em repouso via `APP_KEY` pode ser habilitado/ajustado conforme política do ambiente
-- Cada job grava a `key_id` vigente no momento da criação. Mesmo após rotações, o agente deve decifrar o job usando a mesma `key_id` registrada no job.
+1. Verificar `transit_alg` do job
+2. Usar a chave correspondente ao `key_id`
+3. Decodificar base64 dos campos
+4. Descriptografar usando algoritmo apropriado
 
 ---
 
-## Auditoria & Logs
+## Cliente Python
+
+### Instalação
+
+```bash
+pip install requests cryptography
+```
+
+### Script de Exemplo
+
+**Arquivo: `gateway_client.py`**
+
+```python
+#!/usr/bin/env python3
+import requests
+from gateway_crypto import GatewayCrypto
+
+# Configuração
+API_URL = "http://localhost:8080/api/gateways"
+GATEWAY_ID = "01k6r329jtd08nmnw6q4kgpwqn"
+API_USER = "admin@admin.com"
+API_PASS = "senha"
+KEY_MATERIAL = "1bvF9syKJ7b+533dZ+adZIBbDl4Wqz3YsBQ3Q9iU5Vs="
+
+# Inicializar cliente de criptografia
+crypto = GatewayCrypto(KEY_MATERIAL)
+
+# Buscar jobs pendentes
+response = requests.get(
+    f"{API_URL}/{GATEWAY_ID}/sql-jobs/pending",
+    auth=(API_USER, API_PASS),
+    params={"limit": 10}
+)
+
+jobs = response.json()['data']
+
+# Processar cada job
+for job in jobs:
+    job_id = job['id']
+    
+    try:
+        # Descriptografar SQL
+        sql = crypto.decrypt_sql_job(job)
+        print(f"SQL: {sql}")
+        
+        # Executar no banco local
+        # cursor.execute(sql)
+        # conn.commit()
+        
+        # Confirmar sucesso
+        requests.post(
+            f"{API_URL}/{GATEWAY_ID}/sql-jobs/{job_id}/ack",
+            auth=(API_USER, API_PASS)
+        )
+        
+    except Exception as e:
+        # Registrar falha
+        requests.post(
+            f"{API_URL}/{GATEWAY_ID}/sql-jobs/{job_id}/fail",
+            auth=(API_USER, API_PASS),
+            json={"mensagem": str(e)}
+        )
+```
+
+### Módulo de Criptografia
+
+**Arquivo: `gateway_crypto.py`**
+
+```python
+import base64
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM, ChaCha20Poly1305
+
+class GatewayCrypto:
+    def __init__(self, key_material_b64: str):
+        self.key = base64.b64decode(key_material_b64)
+        if len(self.key) != 32:
+            raise ValueError("Chave deve ter 32 bytes")
+    
+    def decrypt_sql_job(self, job: dict) -> str:
+        alg = job['transit_alg']
+        
+        if alg == 'xchacha20poly1305@libsodium':
+            return self._decrypt_xchacha20(job)
+        elif alg == 'aes-256-gcm@openssl':
+            return self._decrypt_aes_gcm(job)
+        else:
+            raise ValueError(f"Algoritmo não suportado: {alg}")
+    
+    def _decrypt_xchacha20(self, job: dict) -> str:
+        cipher = ChaCha20Poly1305(self.key)
+        nonce = base64.b64decode(job['nonce'])
+        ciphertext = base64.b64decode(job['ciphertext'])
+        
+        plaintext = cipher.decrypt(nonce, ciphertext, None)
+        return plaintext.decode('utf-8')
+    
+    def _decrypt_aes_gcm(self, job: dict) -> str:
+        cipher = AESGCM(self.key)
+        nonce = base64.b64decode(job['nonce'])
+        ciphertext = base64.b64decode(job['ciphertext'])
+        tag = base64.b64decode(job['tag'])
+        
+        plaintext = cipher.decrypt(nonce, ciphertext + tag, None)
+        return plaintext.decode('utf-8')
+```
+
+---
+
+## Tracking de Atividade
+
+O campo `last_seen_at` é atualizado automaticamente quando o gateway faz requisições em rotas que incluem `{gateway}`:
+
+- `GET /api/gateways/{id}`
+- `PATCH /api/gateways/{id}`
+- `PATCH /api/gateways/{id}/rotate`
+- `POST /api/gateways/{id}/sql-jobs`
+- `GET /api/gateways/{id}/sql-jobs/pending`
+- `POST /api/gateways/{id}/sql-jobs/{job}/ack`
+- `POST /api/gateways/{id}/sql-jobs/{job}/fail`
+
+**Nota:** Rotas de listagem (`GET /api/gateways`) **não** atualizam `last_seen_at`.
+
+### Monitorar Gateways Inativos
+
+```bash
+# Listar gateways que não aparecem há mais de 1 hora
+curl -u admin@admin.com:senha \
+  "http://localhost:8080/api/gateways" | \
+  jq '.data[] | select(.last_seen_at < (now - 3600))'
+```
+
+---
+
+## Auditoria e Logs
 
 ### Canais de Log
 
 **SQL Jobs:**
 - Canal: `gateway_sql`
-- Arquivos: `storage/logs/gateway_sql-*.log`
+- Arquivos: `storage/logs/gateway-sql-*.log`
 - Eventos: `sql_job_criado`, `sql_job_enviado`, `sql_job_ack`, `sql_job_falha`
+- Retenção: 30 dias
 
-**Chaves/Gateways:**
-- Canal: `gateway_audit` (se habilitado)
-- Arquivos: `storage/logs/gateway_audit-*.log`
+**Auditoria de Chaves:**
+- Canal: `gateway_audit`
+- Arquivos: `storage/logs/gateway-audit-*.log`
+- Eventos: `criar_chave`, `rotacionar_chave`
+- Retenção: 90 dias
 
-### Ver Últimos Logs
+### Ver Logs
 
 ```bash
-# Listar logs disponíveis
-docker compose exec app sh -lc "ls -1 storage/logs | grep -E 'gateway_(sql|audit)' || true"
+# Logs de SQL jobs
+docker exec app tail -f storage/logs/gateway-sql.log
 
-# Ver últimos registros de SQL jobs
-docker compose exec app sh -lc "tail -n 50 storage/logs/gateway_sql-*.log"
+# Logs de auditoria
+docker exec app tail -f storage/logs/gateway-audit.log
 
-# Ver últimos registros de auditoria
-docker compose exec app sh -lc "tail -n 50 storage/logs/gateway_audit-*.log"
+# Logs gerais da aplicação
+docker exec app tail -f storage/logs/laravel.log
 ```
 
-> **Importante:** o material da chave não é logado em texto puro. O armazenamento em repouso pode ser cifrado via `APP_KEY` (Crypt) conforme política do ambiente; por padrão, está em **base64**.
+### Exemplo de Log de SQL Job
+
+```json
+{
+  "timestamp": "2025-10-04T13:15:42.000000Z",
+  "level": "info",
+  "message": "sql_job_criado",
+  "context": {
+    "job_id": "01k6qnta4nqnxqa79nb1j7thbg",
+    "gateway_id": "01k6r329jtd08nmnw6q4kgpwqn",
+    "alg": "xchacha20poly1305@libsodium",
+    "key_id": "key_v1",
+    "status": "pending"
+  }
+}
+```
+
+**Importante:** O material da chave e o SQL em texto plano **nunca** são logados.
 
 ---
 
-## Troubleshooting Rápido
+## Testes
 
-### Invalid route action …
+### Script End-to-End
 
-Conferir namespace/classe das Actions e rodar:
+**Arquivo:** `test_gateway_flow.sh`
+
+Testa fluxo completo: criação, listagem, criptografia, ACK e rotação.
 
 ```bash
-docker compose exec app composer dump-autoload
-docker compose exec app php artisan optimize:clear
+chmod +x test_gateway_flow.sh
+./test_gateway_flow.sh
 ```
 
-### 404 /api/…
+**Saída esperada:**
 
-Checar `routes/api.php` e cache de rotas.
+```
+✅ Health check OK
+✅ Gateway criado com sucesso
+✅ Segurança OK: key_material não é exposta no GET
+✅ SQL Job criado com sucesso
+✅ Job retornado com dados criptografados
+✅ ACK confirmado com sucesso
+✅ Chave rotacionada com sucesso
+```
 
-### 401/403
+### Testes Manuais
 
-Verificar credenciais Basic Auth. Endpoints são "admin-only".
+#### 1. Criar Gateway
 
-### The payload is invalid. (DecryptException)
+```bash
+curl -u admin@admin.com:senha \
+  -H "Content-Type: application/json" \
+  -X POST http://localhost:8080/api/gateways \
+  -d '{"nome":"test-gateway","ativo":true}' | jq .
+```
 
-Verificar:
-- Compatibilidade entre armazenamento do material da chave e o serviço de cifra em trânsito
-- Garantir que o agente usa `key_id` e algoritmo corretos ao decifrar
-- Confirmar que a extensão correta está disponível (ext-sodium ou ext-openssl)
+Salvar `key_material` retornado.
 
-### Sem libsodium
+#### 2. Enviar SQL Job
 
-Se a extensão `ext-sodium` não estiver disponível, o sistema usará automaticamente `aes-256-gcm@openssl` (com tag presente).
+```bash
+GATEWAY_ID="<id_do_gateway_criado>"
+
+curl -u admin@admin.com:senha \
+  -H "Content-Type: application/json" \
+  -X POST http://localhost:8080/api/gateways/$GATEWAY_ID/sql-jobs \
+  -d '{"sql":"SELECT 1"}' | jq .
+```
+
+#### 3. Buscar Jobs Pendentes
+
+```bash
+curl -u admin@admin.com:senha \
+  "http://localhost:8080/api/gateways/$GATEWAY_ID/sql-jobs/pending" | jq .
+```
+
+#### 4. Testar Cliente Python
+
+```bash
+# Editar gateway_client.py com GATEWAY_ID e KEY_MATERIAL
+python3 gateway_client.py
+```
 
 ---
 
-## Requisitos
+## Troubleshooting
 
-- PHP 8.x
-- Laravel
-- ext-sodium (recomendado) ou ext-openssl
-- Docker & Docker Compose (para ambiente de desenvolvimento)
+### Erro 404: /api/health
+
+**Problema:** Rota não encontrada.
+
+**Solução:**
+```bash
+# Limpar cache de rotas
+docker exec app php artisan route:clear
+docker exec app php artisan config:clear
+
+# Verificar rotas registradas
+docker exec app php artisan route:list | grep health
+```
+
+### Erro 401: Unauthorized
+
+**Problema:** Credenciais inválidas.
+
+**Solução:**
+```bash
+# Verificar usuário existe
+docker exec -it app php artisan tinker
+```
+
+```php
+\App\Models\User::where('email', 'admin@admin.com')->first();
+```
+
+### Erro 405: Method Not Allowed
+
+**Problema:** Método HTTP incorreto.
+
+**Solução:** Verificar se está usando o método correto:
+- Rotação de chave: `PATCH` (não `POST`)
+- Criação de gateway: `POST`
+- Listagem: `GET`
+
+### Erro: The payload is invalid (DecryptException)
+
+**Problema:** Falha ao descriptografar.
+
+**Causas possíveis:**
+1. `key_id` do job não corresponde à chave usada pelo agente
+2. Chave base64 incorreta
+3. Extensão libsodium não disponível
+
+**Solução:**
+```bash
+# Verificar extensão PHP
+docker exec app php -m | grep sodium
+
+# Verificar chave do gateway
+curl -u admin@admin.com:senha \
+  http://localhost:8080/api/gateways/{id} | jq '.data.key_id'
+```
+
+### Container não sobe
+
+**Problema:** Erro ao iniciar Docker Compose.
+
+**Solução:**
+```bash
+# Ver logs
+docker-compose logs app
+
+# Reconstruir imagem
+docker-compose down
+docker-compose build --no-cache
+docker-compose up -d
+```
+
+### Permissões negadas em storage/
+
+**Problema:** Laravel não consegue escrever logs.
+
+**Solução:**
+```bash
+docker exec app chown -R apiuser:apiuser /var/www/html/storage
+docker exec app chown -R apiuser:apiuser /var/www/html/bootstrap/cache
+```
+
+### Jobs ficam em status 'sent' permanentemente
+
+**Problema:** Agente não está enviando ACK/FAIL.
+
+**Solução:**
+1. Verificar se agente está rodando
+2. Verificar logs do agente
+3. Confirmar que `key_material` está correto
+4. Testar descriptografia manualmente
+
+### Nginx retorna 502 Bad Gateway
+
+**Problema:** PHP-FPM não está respondendo.
+
+**Solução:**
+```bash
+# Verificar status do PHP-FPM
+docker exec app php-fpm -t
+
+# Ver logs do Nginx
+docker exec proxy tail -f /var/log/nginx/error.log
+
+# Reiniciar container
+docker-compose restart app
+```
+
+---
 
 ## Segurança
 
-- Autenticação via HTTP Basic (considere OAuth2/JWT para produção)
-- SQLs cifrados em trânsito
-- Chaves rotacionáveis
-- Auditoria completa de ações
-- Logs estruturados sem exposição de dados sensíveis
+### Checklist de Produção
+
+- [ ] SSL/TLS configurado (Let's Encrypt)
+- [ ] Firewall restringindo portas (apenas 80/443)
+- [ ] Senhas fortes para usuários
+- [ ] Autenticação robusta (considerar JWT/OAuth2)
+- [ ] Rate limiting configurado
+- [ ] Logs monitorados
+- [ ] Backup automático do banco
+- [ ] Rotação periódica de chaves dos gateways
+- [ ] Variáveis de ambiente protegidas
+- [ ] `.env` nunca commitado no git
+
+### Boas Práticas
+
+1. **Chaves:**
+   - Nunca commitar `key_material` no código
+   - Armazenar em variáveis de ambiente ou secrets manager
+   - Rotacionar periodicamente (a cada 90 dias recomendado)
+
+2. **Autenticação:**
+   - Usar HTTPS em produção (obrigatório)
+   - Considerar JWT ou Laravel Sanctum
+   - Implementar rate limiting
+
+3. **Logs:**
+   - Monitorar tentativas de ACK/FAIL excessivas
+   - Alertar sobre gateways inativos (>24h sem last_seen_at)
+   - Revisar logs de auditoria regularmente
+
+4. **Rede:**
+   - Restringir acesso à API apenas IPs confiáveis
+   - Usar VPN para comunicação gateway ↔ API
+   - Firewall no nível de container/host
 
 ---
 
-**Desenvolvido com Laravel** | **Documentação atualizada em 04/10/2025**
+## Licença
+
+Proprietary - Todos os direitos reservados
+
+---
+
+## Suporte
+
+Para problemas ou dúvidas:
+
+1. Verificar seção [Troubleshooting](#troubleshooting)
+2. Consultar logs da aplicação
+3. Abrir issue no repositório (se aplicável)
+
+---
+
+**Desenvolvido com Laravel 11 + PHP 8.2-FPM + PostgreSQL 17.5**
+
+**Documentação atualizada em 04/10/2025**
