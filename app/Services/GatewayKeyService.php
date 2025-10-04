@@ -10,26 +10,13 @@ use Illuminate\Support\Facades\Log;
 
 class GatewayKeyService
 {
-    /** Descrição do algoritmo usado no M1 (Crypt do Laravel com APP_KEY) */
     public const ALG_M1 = 'app-key@laravel-crypt';
 
-    /** Gera material de chave aleatório (em base64) */
     public function generateKeyMaterial(int $tamanhoEmBytes = 32): string
     {
         return base64_encode(random_bytes($tamanhoEmBytes));
     }
 
-    public function encryptAtRest(string $textoPlano): string
-    {
-        return encrypt($textoPlano);
-    }
-
-    public function decryptAtRest(string $textoCifrado): string
-    {
-        return decrypt($textoCifrado);
-    }
-
-    /** Calcula o próximo identificador de chave (key_vN) */
     public function nextKeyId(?string $chaveAtual): string
     {
         if (!$chaveAtual) {
@@ -45,14 +32,10 @@ class GatewayKeyService
     }
 
     /**
-     * Cria um gateway já com key_v1 e registra auditoria.
-     *
-     * @param  string   $nome
-     * @param  int|null $atorId
-     * @param  array    $atributosExtras
-     * @return \App\Models\Gateway
+     * Cria um gateway com chave e retorna tanto o gateway quanto a chave em texto plano.
+     * @return array{gateway: Gateway, key_material_plaintext: string}
      */
-    public function createGatewayWithKey(string $nome, ?int $atorId = null, array $atributosExtras = []): Gateway
+    public function createGatewayWithKey(string $nome, ?int $atorId = null, array $atributosExtras = []): array
     {
         return DB::transaction(function () use ($nome, $atorId, $atributosExtras) {
             $materialDaChaveEmTextoPlano = $this->generateKeyMaterial(32);
@@ -74,24 +57,25 @@ class GatewayKeyService
                 'ator_id'    => $atorId,
             ]);
 
-              Log::channel('gateway_audit')->info('Gateway criado com key_v1', [
+            Log::channel('gateway_audit')->info('Gateway criado com key_v1', [
                 'gateway_id' => $gateway->id,
                 'nome'       => $gateway->nome,
                 'ator_id'    => $atorId,
             ]);
 
-            return $gateway;
+            return [
+                'gateway' => $gateway,
+                'key_material_plaintext' => $materialDaChaveEmTextoPlano,
+            ];
         });
     }
 
     /**
-     * Rotaciona a chave do gateway para a próxima versão e audita.
-     *
-     * @param  \App\Models\Gateway $gateway
-     * @param  int|null            $atorId
-     * @return \App\Models\Gateway
+     * Rotaciona a chave do gateway.
+     * 
+     * @return array{gateway: Gateway, key_material_plaintext: string}
      */
-    public function rotateKey(Gateway $gateway, ?int $atorId = null): Gateway
+    public function rotateKey(Gateway $gateway, ?int $atorId = null): array
     {
         return DB::transaction(function () use ($gateway, $atorId) {
             $identificadorChaveAnterior = $gateway->key_id;
@@ -115,7 +99,16 @@ class GatewayKeyService
                 'ator_id'    => $atorId,
             ]);
 
-            return $gateway->fresh();
+            Log::info('Chave rotacionada', [
+                'gateway_id' => $gateway->id,
+                'old_key_id' => $identificadorChaveAnterior,
+                'new_key_id' => $identificadorChaveNova,
+            ]);
+
+            return [
+                'gateway' => $gateway->fresh(),
+                'key_material_plaintext' => $materialDaChaveEmTextoPlano,
+            ];
         });
     }
 }

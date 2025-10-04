@@ -3,14 +3,14 @@
 namespace App\Http\Controllers\Actions\Gateway;
 
 use App\Models\Gateway;
+use App\Http\Resources\GatewayResource;
 
 class ShowGatewayAction
 {
     public function __invoke(Gateway $gateway)
     {
-        $dados = $gateway->toArray();
-        unset($dados['key_material_encrypted']);
-
-        return response()->json(['data' => $dados]);
+        $gateway->load(['criador:id,name', 'atualizador:id,name']);
+        
+        return new GatewayResource($gateway);
     }
 }

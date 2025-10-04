@@ -3,6 +3,7 @@
 namespace App\Http\Requests\Gateway;
 
 use Illuminate\Foundation\Http\FormRequest;
+use Illuminate\Validation\Rule;
 
 class StoreGatewayRequest extends FormRequest
 {
@@ -14,17 +15,25 @@ class StoreGatewayRequest extends FormRequest
     public function rules(): array
     {
         return [
-            'nome'        => ['required', 'string', 'max:150', 'unique:gateways,nome'],
-            'ativo'       => ['sometimes', 'boolean'],
-            'observacoes' => ['sometimes', 'nullable', 'string'],
+            'nome' => [
+                'required',
+                'string',
+                'min:3',
+                'max:100',
+                'regex:/^[a-z0-9\-_]+$/',
+                Rule::unique('gateways', 'nome'),
+            ],
+            'ativo' => 'boolean',
+            'observacoes' => 'nullable|string|max:1000',
         ];
     }
 
     public function messages(): array
     {
         return [
-            'nome.required' => 'O campo nome é obrigatório.',
-            'nome.unique'   => 'Já existe um gateway com este nome.',
+            'nome.required' => 'O nome do gateway é obrigatório.',
+            'nome.regex' => 'O nome deve conter apenas letras minúsculas, números, hífen e underscore.',
+            'nome.unique' => 'Já existe um gateway com este nome.',
         ];
     }
 }

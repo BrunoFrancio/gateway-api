@@ -13,16 +13,28 @@ class CreateGatewayAction
     {
         $usuarioId = $requisicao->user()?->id;
 
-        $gateway = $this->casoDeUso->executar(
+        $resultado = $this->casoDeUso->executar(
             nome: $requisicao->string('nome'),
             ativo: $requisicao->boolean('ativo', true),
             observacoes: $requisicao->input('observacoes'),
             usuarioId: $usuarioId
         );
 
-        $dados = $gateway->toArray();
-        unset($dados['key_material_encrypted']);
+        $resposta = [
+            'id'          => $resultado['gateway']->id,
+            'nome'        => $resultado['gateway']->nome,
+            'ativo'       => $resultado['gateway']->ativo,
+            'key_id'      => $resultado['gateway']->key_id,
+            'key_alg'     => $resultado['gateway']->key_alg,
+            'observacoes' => $resultado['gateway']->observacoes,
+            'created_at'  => $resultado['gateway']->created_at->toISOString(),
 
-        return response()->json(['data' => $dados], 201);
+            'key_material' => $resultado['key_material_plaintext'],
+        ];
+
+        return response()->json([
+            'data' => $resposta,
+            'message' => 'Gateway criado com sucesso. ATENÇÃO: Armazene a chave de forma segura, ela não será exibida novamente!'
+        ], 201);
     }
 }

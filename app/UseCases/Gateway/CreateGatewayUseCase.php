@@ -9,7 +9,10 @@ class CreateGatewayUseCase
 {
     public function __construct(private GatewayKeyService $servicoDeChaves) {}
 
-    public function executar(string $nome, bool $ativo, ?string $observacoes, ?int $usuarioId): Gateway
+    /**
+     * @return array{gateway: Gateway, key_material_plaintext: string}
+     */
+    public function executar(string $nome, bool $ativo, ?string $observacoes, ?int $usuarioId): array
     {
         return $this->servicoDeChaves->createGatewayWithKey(
             nome: $nome,
