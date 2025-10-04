@@ -5,6 +5,7 @@ Sistema para gerenciamento de gateways com suporte a enfileiramento de SQLs cifr
 ## Índice
 
 - [Autenticação e Headers](#autenticação-e-headers)
+- [Healthcheck](#healthcheck)
 - [API de Gateways](#endpoints-gateways)
   - [Listar Gateways](#listar-gateways)
   - [Criar Gateway](#criar-gateway)
@@ -42,15 +43,26 @@ curl -u admin@local.test:admin12345 \
 
 ---
 
+## Healthcheck
+
+**GET** `/api/health`
+
+Retorna `{"status":"ok"}` para verificação de liveness.
+
+```bash
+curl -s http://localhost:8080/api/health
+```
+
 ## Endpoints Gateways
 
 ### Listar Gateways
 
-**GET** `/api/gateways?active=&search=&per_page=`
+**GET** `/api/gateways?active=&search=&page=&per_page=`
 
 **Parâmetros:**
 - `active`: 1 (true) ou 0 (false) — opcional
 - `search`: termo livre (nome) — opcional
+- `page`: número da página — opcional
 - `per_page`: padrão 15 — opcional
 
 **Exemplo:**
@@ -58,7 +70,7 @@ curl -u admin@local.test:admin12345 \
 ```bash
 curl -u admin@local.test:admin12345 -s \
   -H "Accept: application/json" \
-  "http://localhost:8080/api/gateways?active=1&search=GW&per_page=10"
+  "http://localhost:8080/api/gateways?active=1&search=GW&page=1&per_page=10"
 ```
 
 **Resposta (exemplo):**
@@ -269,6 +281,16 @@ curl -s -u admin@local.test:admin12345 \
 }
 ```
 
+### Fluxo operacional do agente
+
+1. **Listar pendentes:** `GET /api/gateways/{id}/sql-jobs/pending`
+2. **Decifrar localmente** usando `transit_alg`, `nonce`, `tag` (se houver) e a chave da `key_id` do job.
+3. **Executar** o SQL na estação.
+4. **Responder:**
+   - sucesso → `POST /api/gateways/{id}/sql-jobs/{job}/ack`
+   - falha → `POST /api/gateways/{id}/sql-jobs/{job}/fail` com `{"mensagem":"..."}`
+
+
 ---
 
 ### Listar Jobs Pendentes (agente)
@@ -388,6 +410,7 @@ openssl_decrypt($cipher, 'aes-256-gcm', $key, OPENSSL_RAW_DATA, $iv, $tag)
 - Em trânsito, os dados vão cifrados
 - Em repouso, o projeto mantém o campo `key_id` e o material da chave para uso do agente
 - Cifrar em repouso via `APP_KEY` pode ser habilitado/ajustado conforme política do ambiente
+- Cada job grava a `key_id` vigente no momento da criação. Mesmo após rotações, o agente deve decifrar o job usando a mesma `key_id` registrada no job.
 
 ---
 
@@ -417,7 +440,7 @@ docker compose exec app sh -lc "tail -n 50 storage/logs/gateway_sql-*.log"
 docker compose exec app sh -lc "tail -n 50 storage/logs/gateway_audit-*.log"
 ```
 
-> **Importante:** o material da chave permanece cifrado em repouso e não é logado em texto puro.
+> **Importante:** o material da chave não é logado em texto puro. O armazenamento em repouso pode ser cifrado via `APP_KEY` (Crypt) conforme política do ambiente; por padrão, está em **base64**.
 
 ---
 
