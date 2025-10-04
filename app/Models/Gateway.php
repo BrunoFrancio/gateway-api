@@ -4,6 +4,7 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Concerns\HasUlids;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
 class Gateway extends Model
 {
@@ -24,15 +25,43 @@ class Gateway extends Model
         'atualizado_por',
     ];
 
-    protected $casts = [
-        'ativo' => 'boolean',
-        'key_rotated_at' => 'datetime',
-        'last_seen_at' => 'datetime',
-        'key_material_encrypted' => 'encrypted:string',
+    protected $hidden = [
+        'key_material_encrypted',
     ];
 
-    public function auditorias(): HasMany
+    protected $casts = [
+        'ativo'          => 'boolean',
+        'key_rotated_at' => 'datetime',
+        'last_seen_at'   => 'datetime',
+    ];
+
+    protected static function booted(): void
+    {
+        static::creating(function (Gateway $gateway) {
+            if (is_null($gateway->criado_por) && auth()->check()) {
+                $gateway->criado_por = auth()->id();
+            }
+        });
+
+        static::updating(function (Gateway $gateway) {
+            if (auth()->check()) {
+                $gateway->atualizado_por = auth()->id();
+            }
+        });
+    }
+
+    public function auditorias()
     {
         return $this->hasMany(GatewayAudit::class, 'gateway_id');
+    }
+
+    public function criador(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'criado_por');
+    }
+
+    public function atualizador(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'atualizado_por');
     }
 }

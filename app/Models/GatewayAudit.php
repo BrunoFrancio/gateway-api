@@ -28,4 +28,9 @@ class GatewayAudit extends Model
     {
         return $this->belongsTo(Gateway::class);
     }
+
+     public function autor(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'ator_id');
+    }
 }

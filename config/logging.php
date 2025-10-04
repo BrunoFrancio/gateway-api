@@ -126,6 +126,13 @@ return [
         'emergency' => [
             'path' => storage_path('logs/laravel.log'),
         ],
+         'gateway_audit' => [
+            'driver' => 'daily',
+            'path'   => storage_path('logs/gateway_audit.log'),
+            'level'  => 'info',
+            'days'   => 14,
+            'tap'    => [],
+        ],
 
     ],
 
